@@ -96,19 +96,56 @@ for ep in range(MAX_EPISODES):
 
     print("Episode %d | Rewards: %s" % (ep + 1, [round(r, 2) for r in episode_reward]))
 
-# === Plot Reward ===
-plt.plot(reward_history)
+# # === Plot Reward ===
+# plt.plot(reward_history)
+# plt.xlabel("Episode")
+# plt.ylabel("Average Reward")
+# plt.title("Training Reward per Episode (MADDPG)")
+# plt.grid(True)
+# plt.savefig("reward_plot_maddpg.png")
+# plt.show()
+
+# # === Save Trained Actor Models ===
+# os.makedirs("saved_models/maddpg", exist_ok=True)
+
+# for i, agent in enumerate(agents):
+#     model_path = f"saved_models/maddpg/agent{i}_actor.pth"
+#     torch.save(agent.actor.state_dict(), model_path)
+#     print(f"✔️ Saved Agent {i} actor to {model_path}")
+
+# === Plot Reward with Fill Between (warna halus) ===
+def smooth_and_band(y, window=15):
+    y = np.asarray(y, dtype=float)
+    if len(y) < window:
+        window = max(3, len(y)//2 or 1)
+    ma = np.convolve(y, np.ones(window)/window, mode='valid')
+    std = np.array([
+        y[max(0, i-window+1):i+1].std()
+        for i in range(len(y))
+    ])[window-1:]
+    x = np.arange(1, len(y)+1)[window-1:]
+    return x, ma, std
+
+COLORS = {
+    "blue":   "#3B82F6",  # biru
+    "sky":    "#60A5FA",  # biru langit
+    "green":  "#22C55E",  # hijau
+    "orange": "#F59E0B",  # oranye
+}
+
+reward_array = np.array(reward_history)
+x, ma, std = smooth_and_band(reward_array, window=15)
+
+plt.figure(figsize=(8,5))
+plt.plot(x, ma, lw=2.5, color=COLORS["green"], label="MADDPG")
+plt.fill_between(x, ma-std, ma+std, color=COLORS["green"], alpha=0.18)
+
 plt.xlabel("Episode")
 plt.ylabel("Average Reward")
 plt.title("Training Reward per Episode (MADDPG)")
-plt.grid(True)
-plt.savefig("reward_plot.png")
+plt.grid(True, alpha=0.3)
+plt.legend()
+plt.tight_layout()
+plt.savefig("reward_plot_maddpg.png", dpi=200)
 plt.show()
 
-# === Save Trained Actor Models ===
-os.makedirs("saved_models/maddpg", exist_ok=True)
-
-for i, agent in enumerate(agents):
-    model_path = f"saved_models/maddpg/agent{i}_actor.pth"
-    torch.save(agent.actor.state_dict(), model_path)
-    print(f"✔️ Saved Agent {i} actor to {model_path}")

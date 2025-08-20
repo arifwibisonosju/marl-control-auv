@@ -92,20 +92,65 @@ for ep in range(MAX_EPISODES):
 
     print("Episode %d | Rewards: %s" % (ep + 1, [round(r, 2) for r in episode_reward]))
 
-# === Plot Reward ===
-plt.plot(reward_history)
-plt.xlabel("Episode")
-plt.ylabel("Average Reward")
-plt.title("Training Reward per Episode (MAPPO)")
-plt.grid(True)
-plt.savefig("reward_plot_mappo.png")
+# # === Plot Reward ===
+# plt.plot(reward_history)
+# plt.xlabel("Episode")
+# plt.ylabel("Average Reward")
+# plt.title("Training Reward per Episode (MAPPO)")
+# plt.grid(True)
+# plt.savefig("reward_plot_mappo.png")
+# plt.show()
+
+# # === Save Trained Actor Models ===
+# os.makedirs("saved_models/mappo", exist_ok=True)
+
+# for i, agent in enumerate(agents):
+#     model_path = f"saved_models/mappo/agent{i}_actor.pth"
+#     torch.save(agent.actor.state_dict(), model_path)
+#     print(f"✔️ Saved Agent {i} actor to {model_path}")
+
+# ==== helper: moving average & std ====
+def smooth_and_band(y, window=15):
+    y = np.asarray(y, dtype=float)
+    if len(y) < window:  # fallback kalau episode masih sedikit
+        window = max(3, len(y)//2 or 1)
+    ma = np.convolve(y, np.ones(window)/window, mode='valid')
+    std = np.array([
+        y[max(0, i-window+1):i+1].std()
+        for i in range(len(y))
+    ])[window-1:]
+    x  = np.arange(1, len(y)+1)[window-1:]
+    return x, ma, std
+
+# ==== palet warna halus ====
+COLORS = {
+    "blue":   "#3B82F6",  # biru
+    "sky":    "#60A5FA",  # biru langit
+    "green":  "#22C55E",  # hijau
+    "orange": "#F59E0B",  # oranye
+}
+
+def plot_with_fill(ax, y, color, label, window=15):
+    x, ma, std = smooth_and_band(y, window)
+    # garis halus
+    ax.plot(x, ma, lw=2.5, color=color, label=label)
+    # band variasi (±1 std)
+    ax.fill_between(x, ma-std, ma+std, alpha=0.18, color=color)
+
+# ====== contoh pemakaian ======
+# Anda sudah punya reward_history (satu kurva).
+# Kalau hanya satu:
+fig, ax = plt.subplots(figsize=(8,5))
+plot_with_fill(ax, reward_history, COLORS["blue"], "MAPPO", window=15)
+ax.set_xlabel("Episode")
+ax.set_ylabel("Average Reward")
+ax.set_title("Training Reward per Episode (MAPPO)")
+ax.grid(True, alpha=0.3)
+ax.legend()
+plt.tight_layout()
+plt.savefig("reward_plot_mappo.png", dpi=200)
 plt.show()
 
-# === Save Trained Actor Models ===
-os.makedirs("saved_models/mappo", exist_ok=True)
 
-for i, agent in enumerate(agents):
-    model_path = f"saved_models/mappo/agent{i}_actor.pth"
-    torch.save(agent.actor.state_dict(), model_path)
-    print(f"✔️ Saved Agent {i} actor to {model_path}")
+
 

@@ -6,11 +6,11 @@ python train_mappo.py
 
 All three will save to saved_models/ .. maddpg/mappo/moddpg
 
-# Evaluate MADDPG
+# evaluate MADDPG
 python eval.py --algo maddpg --model_path saved_models/maddpg --episodes 100 --render
 
-# Evaluate MAPPO
+# evaluate MAPPO
 python eval.py --algo mappo --model_path saved_models/mappo --episodes 100 --render
 
-# Plot
+# plot
 python plot_eval.py

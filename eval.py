@@ -1,11 +1,10 @@
-# eval.py
 import argparse
 import time
 from pathlib import Path
 import numpy as np
 import torch
 
-from multi_env import MultiUAVEnv, N_AGENTS, OBS_DIM, ACT_DIM
+from multi_env import MultiUAVEnv  # <<< hanya env, tanpa konstanta
 
 # =======================
 # Model definitions
@@ -21,33 +20,87 @@ class ActorNet(torch.nn.Module):
     def forward(self, x):
         return self.net(x)
 
+# <<< helper untuk adaptasi 12D -> 6D (model lama 2D)
+def obs12_to_obs6(o_np: np.ndarray) -> np.ndarray:  # <<<
+    """
+    Ambil komponen 2D dari observasi 12D ter-normalisasi:
+    [x,y,z, vx,vy,vz, dx,dy,dz, cx,cy,cz] -> [x,y, vx,vy, dx,dy]
+    Jika panjang tidak 12, fallback ambil 6 elemen pertama.
+    """
+    if o_np.shape[-1] >= 12:
+        return np.asarray([o_np[0], o_np[1], o_np[3], o_np[4], o_np[6], o_np[7]], dtype=np.float32)
+    return np.asarray(o_np[:6], dtype=np.float32)
+
 class MultiAgentPolicy:
     """
     Memuat actor per agen dari folder model_path:
       agent0_actor.pth, agent1_actor.pth, agent2_actor.pth
+
+    Mendukung dua mode:
+      - Native 3D: obs_dim=12, act_dim=3
+      - Kompat 2D: memuat bobot (6->2), map obs12->obs6 dan aksi2->aksi_env
     """
-    def __init__(self, model_path: str, n_agents: int, obs_dim: int, act_dim: int, device="cpu"):
+    def __init__(self, model_path: str, n_agents: int, obs_dim: int, act_dim_env: int, device="cpu"):
         self.device = torch.device(device)
-        self.actors = []
+        self.n_agents = n_agents
+        self.act_dim_env = act_dim_env  # <<< simpan dim aksi env
+        self.used_2d_compat = False     # <<< flag jika fallback 2D dipakai
+
+        self.actor_fns = []  # <<< simpan callable per-agen: obs(np)->action(np)
+
         base = Path(model_path)
         for i in range(n_agents):
-            actor = ActorNet(obs_dim, act_dim).to(self.device)
             ckpt = base / f"agent{i}_actor.pth"
             if not ckpt.exists():
                 raise FileNotFoundError(f"Model tidak ditemukan: {ckpt}")
+
+            # --- coba load sebagai model 3D (obs_dim, act_dim_env) ---
+            native_actor = ActorNet(obs_dim, act_dim_env).to(self.device)  # <<<
             state = torch.load(ckpt, map_location=self.device)
             if isinstance(state, dict) and "model" in state:
                 state = state["model"]
-            actor.load_state_dict(state)
-            actor.eval()
-            self.actors.append(actor)
+
+            try:
+                native_actor.load_state_dict(state)  # coba native
+                native_actor.eval()
+                # buat fn yang langsung pakai obs 3D
+                def make_native_fn(actor):
+                    @torch.no_grad()
+                    def _fn(o_np: np.ndarray):
+                        o_t = torch.as_tensor(o_np, dtype=torch.float32, device=self.device).unsqueeze(0)
+                        a = actor(o_t).squeeze(0).cpu().numpy()
+                        return a
+                    return _fn
+                self.actor_fns.append(make_native_fn(native_actor))  # <<<
+            except RuntimeError:
+                # --- fallback: model lama 2D (6 -> 2) ---
+                self.used_2d_compat = True  # <<<
+                compat_actor = ActorNet(6, 2).to(self.device)  # <<<
+                compat_actor.load_state_dict(state)
+                compat_actor.eval()
+
+                # fn yang adaptasikan obs12->obs6 dan aksi2->aksi_env
+                def make_compat_fn(actor, act_dim_env):
+                    @torch.no_grad()
+                    def _fn(o_np: np.ndarray):
+                        o6 = obs12_to_obs6(np.asarray(o_np, dtype=np.float32))
+                        o_t = torch.as_tensor(o6, dtype=torch.float32, device=self.device).unsqueeze(0)
+                        a2 = actor(o_t).squeeze(0).cpu().numpy()
+                        # map ke dim aksi env
+                        if act_dim_env <= 2:
+                            return a2[:act_dim_env]
+                        a_env = np.zeros(act_dim_env, dtype=np.float32)
+                        a_env[:2] = a2
+                        # komponen z = 0 (dikunci)
+                        return a_env
+                    return _fn
+                self.actor_fns.append(make_compat_fn(compat_actor, self.act_dim_env))  # <<<
 
     @torch.no_grad()
     def act(self, obs_list):
         actions = []
         for i, o in enumerate(obs_list):
-            o_t = torch.as_tensor(o, dtype=torch.float32, device=self.device).unsqueeze(0)
-            a = self.actors[i](o_t).squeeze(0).cpu().numpy()
+            a = self.actor_fns[i](np.asarray(o, dtype=np.float32))  # <<<
             actions.append(a)
         return actions
 
@@ -55,16 +108,31 @@ class MultiAgentPolicy:
 # Evaluator
 # =======================
 def evaluate(algo: str, model_path: str, episodes: int, render: bool, device: str):
-    env = MultiUAVEnv(render=render)
+    # --- Buat env untuk evaluasi; coba opsi yang stabil saat eval ---  # <<<
+    try:
+        env = MultiUAVEnv(render=render, static_nodes=True, curriculum=False)  # <<<
+    except TypeError:
+        env = MultiUAVEnv(render=render)  # fallback signature lama               # <<<
 
-    # inisialisasi pertama untuk cek dimensi
+    # --- Deteksi dimensi dari env (tanpa impor konstanta) ------------- # <<<
     obs_list = env.reset()
-    assert len(obs_list) == N_AGENTS, "Jumlah obs tidak cocok dengan N_AGENTS"
-    for o in obs_list:
-        assert o.shape[-1] == OBS_DIM, f"OBS_DIM env ({OBS_DIM}) != obs.shape ({o.shape})"
+    N_AGENTS = len(obs_list)
+    OBS_DIM  = int(np.asarray(obs_list[0]).shape[-1])
+    ACT_DIM  = 2 if getattr(env, "lock_z", False) else 3
+    print(f"[EVAL] Detected dims -> n_agents={N_AGENTS}, obs_dim={OBS_DIM}, act_dim={ACT_DIM}")
 
-    # load policy (MAPPO & MADDPG sama-sama per-agent di setup ini)
-    policy = MultiAgentPolicy(model_path, N_AGENTS, OBS_DIM, ACT_DIM, device=device)
+    # load policy (dengan fallback 2D jika perlu)
+    policy = MultiAgentPolicy(model_path, N_AGENTS, OBS_DIM, ACT_DIM, device=device)  # <<<
+
+    # Jika memakai model 2D, kunci sumbu Z agar konsisten
+    if getattr(policy, "used_2d_compat", False):  # <<<
+        if hasattr(env, "lock_z"):
+            env.lock_z = True
+            print("[EVAL] 2D checkpoint terdeteksi -> lock_z diaktifkan & aksi Z=0.")  # <<<
+        else:
+            print("[EVAL] 2D checkpoint terdeteksi; aksi Z akan dipaksa 0 di sisi policy.")  # <<<
+
+        # Jika ACT_DIM awal 3 tapi Z dikunci, tidak masalah: policy sudah padding 0.  # <<<
 
     all_eps = []
     t0 = time.time()
